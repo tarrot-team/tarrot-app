@@ -1,0 +1,12 @@
+/services/tarot-service/      @xayse @g0disd3ad
+/services/realtime-service/   @xayse @pipipupkabebra-max
+/services/community-service/  @g0disd3ad @xayse
+/services/media-service/      @g0disd3ad @pipipupkabebra-max
+/services/auth-service/       @spipipupkabebra-max @g0disd3ad
+/services/gateway/            @pipipupkabebra-max @xayse
+
+/go.mod                       @xayse @g0disd3ad @pipipupkabebra-max
+/pkg/                         @xayse @g0disd3ad @pipipupkabebra-max
+/proto/                       @xayse @gg0disd3ad @pipipupkabebra-max
+/deploy/                      @g0disd3ad @pipipupkabebra-max
+/.github/                     @pipipupkabebra-max @g0disd3ad

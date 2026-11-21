@@ -1,0 +1,27 @@
+cat > .gitignore <<'EOF'
+# Go
+*.exe
+*.test
+*.out
+bin/
+vendor/
+coverage.*
+
+# Секреты
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Редакторы и система
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Данные
+deploy/data/
+*.log
+EOF
