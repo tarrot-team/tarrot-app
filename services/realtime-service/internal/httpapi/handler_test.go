@@ -10,12 +10,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tarrot-team/tarrot-app/pkg/auth"
 	"github.com/tarrot-team/tarrot-app/services/realtime-service/internal/hub"
 	"github.com/tarrot-team/tarrot-app/services/realtime-service/internal/store"
 )
 
+var testJWTSecret = []byte("test-jwt-secret")
+
+func bearerFor(t *testing.T, userID string) string {
+	t.Helper()
+	tok, err := auth.Sign(testJWTSecret, auth.Claims{Sub: userID, Role: "user"})
+	if err != nil {
+		t.Fatalf("auth.Sign: %v", err)
+	}
+	return "Bearer " + tok
+}
+
 func TestHandleHealth(t *testing.T) {
-	api := NewHandler(hub.New(), store.NewMemoryStore())
+	api := NewHandler(hub.New(), store.NewMemoryStore(), testJWTSecret)
 	rec := httptest.NewRecorder()
 	api.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
@@ -25,16 +37,18 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestPostAndGetRoomMessages(t *testing.T) {
-	api := NewHandler(hub.New(), store.NewMemoryStore())
+	api := NewHandler(hub.New(), store.NewMemoryStore(), testJWTSecret)
 
-	unauth := httptest.NewRecorder()
-	api.ServeHTTP(unauth, httptest.NewRequest(http.MethodPost, "/rooms/tarot/messages", bytes.NewBufferString(`{"text":"hi"}`)))
-	if unauth.Code != http.StatusUnauthorized {
-		t.Fatalf("unauth status = %d; want 401", unauth.Code)
+	spoofed := httptest.NewRequest(http.MethodPost, "/rooms/tarot/messages", bytes.NewBufferString(`{"text":"hi"}`))
+	spoofed.Header.Set("X-User-ID", "user-1")
+	spoofedRec := httptest.NewRecorder()
+	api.ServeHTTP(spoofedRec, spoofed)
+	if spoofedRec.Code != http.StatusUnauthorized {
+		t.Fatalf("spoofed status = %d; want 401", spoofedRec.Code)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/rooms/tarot/messages", bytes.NewBufferString(`{"text":"Привет, чат!"}`))
-	req.Header.Set("X-User-ID", "user-1")
+	req.Header.Set("Authorization", bearerFor(t, "user-1"))
 	rec := httptest.NewRecorder()
 	api.ServeHTTP(rec, req)
 
@@ -59,11 +73,11 @@ func TestPostAndGetRoomMessages(t *testing.T) {
 
 func TestRoomSSEStream(t *testing.T) {
 	h := hub.New()
-	api := NewHandler(h, store.NewMemoryStore())
+	api := NewHandler(h, store.NewMemoryStore(), testJWTSecret)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/rooms/tarot/stream", nil).WithContext(ctx)
-	req.Header.Set("X-User-ID", "user-1")
+	req.Header.Set("Authorization", bearerFor(t, "user-1"))
 	rec := httptest.NewRecorder()
 
 	done := make(chan struct{})
@@ -93,7 +107,7 @@ func TestRoomSSEStream(t *testing.T) {
 
 func TestSendNotification(t *testing.T) {
 	h := hub.New()
-	api := NewHandler(h, store.NewMemoryStore())
+	api := NewHandler(h, store.NewMemoryStore(), testJWTSecret)
 
 	ch, cancel := h.SubscribeUser("user-9")
 	defer cancel()

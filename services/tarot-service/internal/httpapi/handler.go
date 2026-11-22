@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tarrot-team/tarrot-app/pkg/auth"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/arcana"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/deck"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/interpreter"
@@ -67,7 +68,7 @@ type handler struct {
 	readings    reading.Store
 }
 
-func NewHandler(interp interpreter.Interpreter, store reading.Store) http.Handler {
+func NewHandler(interp interpreter.Interpreter, store reading.Store, jwtSecret []byte) http.Handler {
 	if interp == nil {
 		interp = interpreter.FallbackInterpreter{}
 	}
@@ -90,7 +91,7 @@ func NewHandler(interp interpreter.Interpreter, store reading.Store) http.Handle
 	mux.HandleFunc("GET /spreads", h.handleListSpreads)
 	mux.HandleFunc("GET /spreads/{id}", h.handleGetSpread)
 	mux.HandleFunc("DELETE /spreads/{id}", h.handleDeleteSpread)
-	return mux
+	return auth.Middleware(jwtSecret)(mux)
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -282,7 +283,7 @@ func (h *handler) handleSpread(w http.ResponseWriter, r *http.Request) {
 		Source:         res.Source,
 	}
 
-	if userID := strings.TrimSpace(r.Header.Get("X-User-ID")); userID != "" {
+	if userID, ok := auth.UserID(r.Context()); ok {
 		now := time.Now().UTC()
 		rec := reading.Reading{
 			ID:             reading.NewID(),
@@ -306,9 +307,9 @@ func (h *handler) handleSpread(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleListSpreads(w http.ResponseWriter, r *http.Request) {
-	userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
-	if userID == "" {
-		writeError(w, http.StatusUnauthorized, "missing X-User-ID header")
+	userID, ok := auth.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 
@@ -332,6 +333,12 @@ func (h *handler) handleListSpreads(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleGetSpread(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	id := strings.TrimSpace(r.PathValue("id"))
 	item, err := h.readings.GetByID(r.Context(), id)
 	if err != nil {
@@ -342,14 +349,18 @@ func (h *handler) handleGetSpread(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to get reading")
 		return
 	}
+	if item.UserID != userID {
+		writeError(w, http.StatusForbidden, "reading belongs to another user")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, item)
 }
 
 func (h *handler) handleDeleteSpread(w http.ResponseWriter, r *http.Request) {
-	userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
-	if userID == "" {
-		writeError(w, http.StatusUnauthorized, "missing X-User-ID header")
+	userID, ok := auth.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 

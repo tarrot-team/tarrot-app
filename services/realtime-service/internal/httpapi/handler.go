@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/tarrot-team/tarrot-app/pkg/auth"
 	"github.com/tarrot-team/tarrot-app/services/realtime-service/internal/hub"
 	"github.com/tarrot-team/tarrot-app/services/realtime-service/internal/store"
 )
@@ -45,7 +46,7 @@ type handler struct {
 	store store.MessageStore
 }
 
-func NewHandler(h *hub.Hub, st store.MessageStore) http.Handler {
+func NewHandler(h *hub.Hub, st store.MessageStore, jwtSecret []byte) http.Handler {
 	if h == nil {
 		h = hub.New()
 	}
@@ -61,7 +62,7 @@ func NewHandler(h *hub.Hub, st store.MessageStore) http.Handler {
 	mux.HandleFunc("POST /rooms/{room}/messages", api.handlePostMessage)
 	mux.HandleFunc("GET /notifications/stream", api.handleNotificationStream)
 	mux.HandleFunc("POST /notifications", api.handleSendNotification)
-	return mux
+	return auth.Middleware(jwtSecret)(mux)
 }
 
 func handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -69,9 +70,9 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *handler) handlePostMessage(w http.ResponseWriter, r *http.Request) {
-	userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
-	if userID == "" {
-		writeError(w, http.StatusUnauthorized, "missing X-User-ID header")
+	userID, ok := auth.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 
@@ -137,9 +138,8 @@ func (h *handler) handleRoomMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleRoomStream(w http.ResponseWriter, r *http.Request) {
-	userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
-	if userID == "" {
-		writeError(w, http.StatusUnauthorized, "missing X-User-ID header")
+	if _, ok := auth.UserID(r.Context()); !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 
@@ -156,9 +156,9 @@ func (h *handler) handleRoomStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleNotificationStream(w http.ResponseWriter, r *http.Request) {
-	userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
-	if userID == "" {
-		writeError(w, http.StatusUnauthorized, "missing X-User-ID header")
+	userID, ok := auth.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
 
