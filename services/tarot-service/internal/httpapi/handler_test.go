@@ -9,11 +9,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tarrot-team/tarrot-app/pkg/auth"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/arcana"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/deck"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/interpreter"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/reading"
 )
+
+var testJWTSecret = []byte("test-jwt-secret")
 
 type mockInterpreter struct {
 	text string
@@ -27,8 +30,17 @@ func (m mockInterpreter) InterpretMatrix(_ context.Context, _ interpreter.Matrix
 	return interpreter.Result{Text: m.text, Source: "ai"}, nil
 }
 
+func bearerFor(t *testing.T, userID string) string {
+	t.Helper()
+	tok, err := auth.Sign(testJWTSecret, auth.Claims{Sub: userID, Role: "user"})
+	if err != nil {
+		t.Fatalf("auth.Sign: %v", err)
+	}
+	return "Bearer " + tok
+}
+
 func TestHandleHealth(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, testJWTSecret)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
 
@@ -40,7 +52,7 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleAllArcana(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, testJWTSecret)
 	req := httptest.NewRequest(http.MethodGet, "/arcana", nil)
 	rec := httptest.NewRecorder()
 
@@ -60,7 +72,7 @@ func TestHandleAllArcana(t *testing.T) {
 }
 
 func TestHandleDeck(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, testJWTSecret)
 	req := httptest.NewRequest(http.MethodGet, "/deck", nil)
 	rec := httptest.NewRecorder()
 
@@ -80,7 +92,7 @@ func TestHandleDeck(t *testing.T) {
 }
 
 func TestHandleArcanaByNumber(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, testJWTSecret)
 
 	t.Run("valid number", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/arcana/8", nil)
@@ -125,7 +137,7 @@ func TestHandleArcanaByNumber(t *testing.T) {
 }
 
 func TestHandleMatrix(t *testing.T) {
-	h := NewHandler(nil, nil)
+	h := NewHandler(nil, nil, testJWTSecret)
 
 	t.Run("valid birth date", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/matrix?birth_date=1999-12-29", nil)
@@ -176,7 +188,7 @@ func TestHandleMatrix(t *testing.T) {
 }
 
 func TestHandleSpread(t *testing.T) {
-	h := NewHandler(mockInterpreter{text: "Тестовая трактовка"}, reading.NewMemoryStore())
+	h := NewHandler(mockInterpreter{text: "Тестовая трактовка"}, reading.NewMemoryStore(), testJWTSecret)
 
 	t.Run("valid three cards", func(t *testing.T) {
 		body := bytes.NewBufferString(`{"type":"three_cards","question":"Что будет на работе?"}`)
@@ -200,7 +212,7 @@ func TestHandleSpread(t *testing.T) {
 			t.Errorf("unexpected interpretation: %+v", got)
 		}
 		if got.ID != "" {
-			t.Errorf("expected empty id without X-User-ID, got %q", got.ID)
+			t.Errorf("expected empty id without jwt, got %q", got.ID)
 		}
 	})
 
@@ -266,10 +278,12 @@ func TestHandleSpread(t *testing.T) {
 }
 
 func TestSpreadHistoryFlow(t *testing.T) {
-	h := NewHandler(mockInterpreter{text: "Сохранённая трактовка"}, reading.NewMemoryStore())
+	h := NewHandler(mockInterpreter{text: "Сохранённая трактовка"}, reading.NewMemoryStore(), testJWTSecret)
+	user1Auth := bearerFor(t, "user-1")
+	user2Auth := bearerFor(t, "user-2")
 
 	createReq := httptest.NewRequest(http.MethodPost, "/spread", bytes.NewBufferString(`{"type":"daily","question":"Как пройдёт день?"}`))
-	createReq.Header.Set("X-User-ID", "user-1")
+	createReq.Header.Set("Authorization", user1Auth)
 	createRec := httptest.NewRecorder()
 	h.ServeHTTP(createRec, createReq)
 
@@ -284,14 +298,16 @@ func TestSpreadHistoryFlow(t *testing.T) {
 		t.Fatalf("expected id and created_at, got %+v", created)
 	}
 
-	unauthList := httptest.NewRecorder()
-	h.ServeHTTP(unauthList, httptest.NewRequest(http.MethodGet, "/spreads", nil))
-	if unauthList.Code != http.StatusUnauthorized {
-		t.Fatalf("unauth list status = %d; want 401", unauthList.Code)
+	spoofedList := httptest.NewRequest(http.MethodGet, "/spreads", nil)
+	spoofedList.Header.Set("X-User-ID", "user-1")
+	spoofedRec := httptest.NewRecorder()
+	h.ServeHTTP(spoofedRec, spoofedList)
+	if spoofedRec.Code != http.StatusUnauthorized {
+		t.Fatalf("spoofed X-User-ID list status = %d; want 401", spoofedRec.Code)
 	}
 
 	listReq := httptest.NewRequest(http.MethodGet, "/spreads", nil)
-	listReq.Header.Set("X-User-ID", "user-1")
+	listReq.Header.Set("Authorization", user1Auth)
 	listRec := httptest.NewRecorder()
 	h.ServeHTTP(listRec, listReq)
 
@@ -306,14 +322,30 @@ func TestSpreadHistoryFlow(t *testing.T) {
 		t.Fatalf("unexpected list: %+v", items)
 	}
 
-	getRec := httptest.NewRecorder()
-	h.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/spreads/"+created.ID, nil))
-	if getRec.Code != http.StatusOK {
-		t.Fatalf("get status = %d; want 200", getRec.Code)
+	guestGetRec := httptest.NewRecorder()
+	h.ServeHTTP(guestGetRec, httptest.NewRequest(http.MethodGet, "/spreads/"+created.ID, nil))
+	if guestGetRec.Code != http.StatusUnauthorized {
+		t.Fatalf("guest get status = %d; want 401", guestGetRec.Code)
+	}
+
+	otherGetReq := httptest.NewRequest(http.MethodGet, "/spreads/"+created.ID, nil)
+	otherGetReq.Header.Set("Authorization", user2Auth)
+	otherGetRec := httptest.NewRecorder()
+	h.ServeHTTP(otherGetRec, otherGetReq)
+	if otherGetRec.Code != http.StatusForbidden {
+		t.Fatalf("other user get status = %d; want 403", otherGetRec.Code)
+	}
+
+	ownerGetReq := httptest.NewRequest(http.MethodGet, "/spreads/"+created.ID, nil)
+	ownerGetReq.Header.Set("Authorization", user1Auth)
+	ownerGetRec := httptest.NewRecorder()
+	h.ServeHTTP(ownerGetRec, ownerGetReq)
+	if ownerGetRec.Code != http.StatusOK {
+		t.Fatalf("owner get status = %d; want 200", ownerGetRec.Code)
 	}
 
 	forbidDel := httptest.NewRequest(http.MethodDelete, "/spreads/"+created.ID, nil)
-	forbidDel.Header.Set("X-User-ID", "user-2")
+	forbidDel.Header.Set("Authorization", user2Auth)
 	forbidRec := httptest.NewRecorder()
 	h.ServeHTTP(forbidRec, forbidDel)
 	if forbidRec.Code != http.StatusForbidden {
@@ -321,22 +353,24 @@ func TestSpreadHistoryFlow(t *testing.T) {
 	}
 
 	delReq := httptest.NewRequest(http.MethodDelete, "/spreads/"+created.ID, nil)
-	delReq.Header.Set("X-User-ID", "user-1")
+	delReq.Header.Set("Authorization", user1Auth)
 	delRec := httptest.NewRecorder()
 	h.ServeHTTP(delRec, delReq)
 	if delRec.Code != http.StatusNoContent {
 		t.Fatalf("delete status = %d; want 204", delRec.Code)
 	}
 
+	missingReq := httptest.NewRequest(http.MethodGet, "/spreads/"+created.ID, nil)
+	missingReq.Header.Set("Authorization", user1Auth)
 	missingRec := httptest.NewRecorder()
-	h.ServeHTTP(missingRec, httptest.NewRequest(http.MethodGet, "/spreads/"+created.ID, nil))
+	h.ServeHTTP(missingRec, missingReq)
 	if missingRec.Code != http.StatusNotFound {
 		t.Fatalf("get deleted status = %d; want 404", missingRec.Code)
 	}
 }
 
 func TestHandleMatrixInterpret(t *testing.T) {
-	h := NewHandler(mockInterpreter{text: "Разбор матрицы"}, nil)
+	h := NewHandler(mockInterpreter{text: "Разбор матрицы"}, nil, testJWTSecret)
 
 	t.Run("valid request", func(t *testing.T) {
 		body := bytes.NewBufferString(`{"birth_date":"1997-01-21","focus":"money"}`)

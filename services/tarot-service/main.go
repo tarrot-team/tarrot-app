@@ -60,9 +60,15 @@ func main() {
 		log.Info("DATABASE_URL is empty, using in-memory storage")
 	}
 
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		jwtSecret = "dev-secret-change-me"
+		log.Warn("JWT_SECRET is empty, using development default")
+	}
+
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           httpapi.NewHandler(interp, store),
+		Handler:           httpapi.NewHandler(interp, store, []byte(jwtSecret)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
