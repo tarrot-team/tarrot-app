@@ -23,6 +23,10 @@ func (m mockInterpreter) InterpretSpread(_ context.Context, _ interpreter.Input)
 	return interpreter.Result{Text: m.text, Source: "ai"}, nil
 }
 
+func (m mockInterpreter) InterpretMatrix(_ context.Context, _ interpreter.MatrixInput) (interpreter.Result, error) {
+	return interpreter.Result{Text: m.text, Source: "ai"}, nil
+}
+
 func TestHandleHealth(t *testing.T) {
 	h := NewHandler(nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
@@ -329,4 +333,35 @@ func TestSpreadHistoryFlow(t *testing.T) {
 	if missingRec.Code != http.StatusNotFound {
 		t.Fatalf("get deleted status = %d; want 404", missingRec.Code)
 	}
+}
+
+func TestHandleMatrixInterpret(t *testing.T) {
+	h := NewHandler(mockInterpreter{text: "Разбор матрицы"}, nil)
+
+	t.Run("valid request", func(t *testing.T) {
+		body := bytes.NewBufferString(`{"birth_date":"1997-01-21","focus":"money"}`)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/matrix/interpret", body))
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d; want 200", rec.Code)
+		}
+		var got matrixInterpretResponse
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Focus != "money" || got.Source != "ai" || got.Interpretation != "Разбор матрицы" {
+			t.Errorf("unexpected response: %+v", got)
+		}
+	})
+
+	t.Run("invalid focus", func(t *testing.T) {
+		body := bytes.NewBufferString(`{"birth_date":"1997-01-21","focus":"health"}`)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/matrix/interpret", body))
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d; want 400", rec.Code)
+		}
+	})
 }

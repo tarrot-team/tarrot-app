@@ -29,6 +29,19 @@ type matrixResponse struct {
 	Arcana    map[string]arcana.Arcana `json:"arcana"`
 }
 
+type matrixInterpretRequest struct {
+	BirthDate string `json:"birth_date"`
+	Focus     string `json:"focus"`
+}
+
+type matrixInterpretResponse struct {
+	BirthDate      string        `json:"birth_date"`
+	Focus          string        `json:"focus"`
+	Matrix         matrix.Matrix `json:"matrix"`
+	Interpretation string        `json:"interpretation"`
+	Source         string        `json:"source"`
+}
+
 type spreadRequest struct {
 	Type     string                   `json:"type"`
 	Question string                   `json:"question"`
@@ -72,6 +85,7 @@ func NewHandler(interp interpreter.Interpreter, store reading.Store) http.Handle
 	mux.HandleFunc("GET /arcana/{number}", handleArcanaByNumber)
 	mux.HandleFunc("GET /deck", handleDeck)
 	mux.HandleFunc("GET /matrix", handleMatrix)
+	mux.HandleFunc("POST /matrix/interpret", h.handleMatrixInterpret)
 	mux.HandleFunc("POST /spread", h.handleSpread)
 	mux.HandleFunc("GET /spreads", h.handleListSpreads)
 	mux.HandleFunc("GET /spreads/{id}", h.handleGetSpread)
@@ -143,6 +157,63 @@ func handleMatrix(w http.ResponseWriter, r *http.Request) {
 		BirthDate: rawDate,
 		Matrix:    m,
 		Arcana:    arcanaMap,
+	})
+}
+
+func (h *handler) handleMatrixInterpret(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+
+	var req matrixInterpretRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+
+	rawDate := strings.TrimSpace(req.BirthDate)
+	if rawDate == "" {
+		writeError(w, http.StatusBadRequest, "birth_date is required (format: YYYY-MM-DD)")
+		return
+	}
+
+	birthDate, err := time.Parse("2006-01-02", rawDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid birth_date format, expected YYYY-MM-DD")
+		return
+	}
+
+	focus := strings.TrimSpace(req.Focus)
+	if focus == "" {
+		focus = "general"
+	}
+	switch focus {
+	case "general", "love", "money", "karmic", "purpose":
+	default:
+		writeError(w, http.StatusBadRequest, "invalid focus: supported are general, love, money, karmic, purpose")
+		return
+	}
+
+	m, err := matrix.Calculate(birthDate)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	res, err := h.interpreter.InterpretMatrix(r.Context(), interpreter.MatrixInput{
+		BirthDate: rawDate,
+		Focus:     focus,
+		Matrix:    m,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to interpret matrix")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, matrixInterpretResponse{
+		BirthDate:      rawDate,
+		Focus:          focus,
+		Matrix:         m,
+		Interpretation: res.Text,
+		Source:         res.Source,
 	})
 }
 
