@@ -46,5 +46,8 @@ func TestAll(t *testing.T) {
 		if a.Number != i+1 {
 			t.Errorf("All()[%d].Number = %d; want %d", i, a.Number, i+1)
 		}
+		if a.Plus == "" || a.Minus == "" || a.Love == "" || a.Money == "" {
+			t.Errorf("All()[%d] (%s) has empty detailed fields", i, a.Name)
+		}
 	}
 }

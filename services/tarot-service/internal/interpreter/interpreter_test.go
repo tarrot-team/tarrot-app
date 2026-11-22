@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/deck"
+	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/matrix"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/spread"
 )
 
@@ -44,6 +46,19 @@ func sampleInput() Input {
 	}
 }
 
+func sampleMatrixInput(t *testing.T) MatrixInput {
+	t.Helper()
+	m, err := matrix.Calculate(time.Date(1997, 1, 21, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("matrix.Calculate error: %v", err)
+	}
+	return MatrixInput{
+		BirthDate: "1997-01-21",
+		Focus:     "general",
+		Matrix:    m,
+	}
+}
+
 func TestFallbackInterpreter(t *testing.T) {
 	res, err := (FallbackInterpreter{}).InterpretSpread(context.Background(), sampleInput())
 	if err != nil {
@@ -54,6 +69,19 @@ func TestFallbackInterpreter(t *testing.T) {
 	}
 	if !strings.Contains(res.Text, "Маг (The Magician)") {
 		t.Errorf("expected card name in text, got: %s", res.Text)
+	}
+}
+
+func TestFallbackInterpretMatrix(t *testing.T) {
+	res, err := (FallbackInterpreter{}).InterpretMatrix(context.Background(), sampleMatrixInput(t))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Source != "fallback" {
+		t.Errorf("source = %q; want fallback", res.Source)
+	}
+	if !strings.Contains(res.Text, "3-12-9") || !strings.Contains(res.Text, "Солнце (The Sun)") {
+		t.Errorf("unexpected matrix fallback text: %s", res.Text)
 	}
 }
 
@@ -89,6 +117,14 @@ func TestOpenAICompatClient(t *testing.T) {
 	if res.Source != "ai" || res.Text != "Отличное время для старта." {
 		t.Errorf("got = %+v; want ai response", res)
 	}
+
+	mres, err := client.InterpretMatrix(context.Background(), sampleMatrixInput(t))
+	if err != nil {
+		t.Fatalf("unexpected matrix error: %v", err)
+	}
+	if mres.Source != "ai" || mres.Text != "Отличное время для старта." {
+		t.Errorf("got matrix = %+v; want ai response", mres)
+	}
 }
 
 func TestWithFallback(t *testing.T) {
@@ -114,5 +150,13 @@ func TestWithFallback(t *testing.T) {
 	}
 	if res.Source != "fallback" {
 		t.Errorf("source = %q; want fallback", res.Source)
+	}
+
+	mres, err := interp.InterpretMatrix(context.Background(), sampleMatrixInput(t))
+	if err != nil {
+		t.Fatalf("unexpected matrix error: %v", err)
+	}
+	if mres.Source != "fallback" {
+		t.Errorf("matrix source = %q; want fallback", mres.Source)
 	}
 }
