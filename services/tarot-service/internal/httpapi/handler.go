@@ -5,11 +5,18 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/arcana"
+	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/deck"
+	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/interpreter"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/matrix"
+	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/spread"
 )
+
+const maxQuestionRunes = 500
 
 type matrixResponse struct {
 	BirthDate string                   `json:"birth_date"`
@@ -17,16 +24,41 @@ type matrixResponse struct {
 	Arcana    map[string]arcana.Arcana `json:"arcana"`
 }
 
+type spreadRequest struct {
+	Type     string                   `json:"type"`
+	Question string                   `json:"question"`
+	Cards    []spread.ManualCardInput `json:"cards,omitempty"`
+}
+
+type spreadResponse struct {
+	Mode           string        `json:"mode"`
+	Question       string        `json:"question,omitempty"`
+	Spread         spread.Spread `json:"spread"`
+	Interpretation string        `json:"interpretation"`
+	Source         string        `json:"source"`
+}
+
 type errorResponse struct {
 	Error string `json:"error"`
 }
 
-func NewHandler() http.Handler {
+type handler struct {
+	interpreter interpreter.Interpreter
+}
+
+func NewHandler(interp interpreter.Interpreter) http.Handler {
+	if interp == nil {
+		interp = interpreter.FallbackInterpreter{}
+	}
+	h := &handler{interpreter: interp}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("GET /arcana", handleAllArcana)
 	mux.HandleFunc("GET /arcana/{number}", handleArcanaByNumber)
+	mux.HandleFunc("GET /deck", handleDeck)
 	mux.HandleFunc("GET /matrix", handleMatrix)
+	mux.HandleFunc("POST /spread", h.handleSpread)
 	return mux
 }
 
@@ -36,6 +68,10 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func handleAllArcana(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, arcana.All())
+}
+
+func handleDeck(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, deck.All())
 }
 
 func handleArcanaByNumber(w http.ResponseWriter, r *http.Request) {
@@ -78,13 +114,9 @@ func handleMatrix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nums := []int{m.A, m.B, m.C, m.D, m.E, m.F, m.G, m.H, m.I, m.J, m.K, m.L, m.M}
 	arcanaMap := make(map[string]arcana.Arcana)
-	for _, n := range nums {
+	for _, n := range m.AllArcanaNumbers() {
 		key := strconv.Itoa(n)
-		if _, exists := arcanaMap[key]; exists {
-			continue
-		}
 		if item, err := arcana.Get(n); err == nil {
 			arcanaMap[key] = item
 		}
@@ -94,6 +126,72 @@ func handleMatrix(w http.ResponseWriter, r *http.Request) {
 		BirthDate: rawDate,
 		Matrix:    m,
 		Arcana:    arcanaMap,
+	})
+}
+
+func (h *handler) handleSpread(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+
+	var req spreadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+
+	req.Type = strings.TrimSpace(req.Type)
+	req.Question = strings.TrimSpace(req.Question)
+	if utf8.RuneCountInString(req.Question) > maxQuestionRunes {
+		writeError(w, http.StatusBadRequest, "question is too long (max 500 characters)")
+		return
+	}
+
+	var (
+		sp   spread.Spread
+		mode string
+		err  error
+	)
+
+	if len(req.Cards) > 0 {
+		mode = "manual"
+		if req.Type == "" {
+			req.Type = "custom"
+		}
+		sp, err = spread.BuildManual(req.Type, req.Cards)
+	} else {
+		mode = "auto"
+		if req.Type == "" {
+			req.Type = "three_cards"
+		}
+		sp, err = spread.Draw(req.Type)
+	}
+
+	if err != nil {
+		if errors.Is(err, spread.ErrUnknownType) ||
+			errors.Is(err, spread.ErrInvalidCardCount) ||
+			errors.Is(err, spread.ErrDuplicateCard) ||
+			errors.Is(err, deck.ErrCardNotFound) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to build spread")
+		return
+	}
+
+	res, err := h.interpreter.InterpretSpread(r.Context(), interpreter.Input{
+		Spread:   sp,
+		Question: req.Question,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to interpret spread")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, spreadResponse{
+		Mode:           mode,
+		Question:       req.Question,
+		Spread:         sp,
+		Interpretation: res.Text,
+		Source:         res.Source,
 	})
 }
 
