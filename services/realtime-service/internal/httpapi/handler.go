@@ -3,9 +3,11 @@ package httpapi
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -15,10 +17,12 @@ import (
 )
 
 const (
-	maxBodyBytes    = 4096
-	maxMessageRunes = 1000
-	defaultLimit    = 20
-	maxLimit        = 50
+	maxBodyBytes     = 4096
+	maxMessageRunes  = 1000
+	defaultLimit     = 20
+	maxLimit         = 50
+	notifyRateLimit  = 20
+	notifyRateWindow = time.Minute
 )
 
 type sendMessageRequest struct {
@@ -41,9 +45,52 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
+type rateLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	window time.Duration
+	hits   map[string][]time.Time
+}
+
+func newRateLimiter(limit int, window time.Duration) *rateLimiter {
+	return &rateLimiter{
+		limit:  limit,
+		window: window,
+		hits:   make(map[string][]time.Time),
+	}
+}
+
+func (l *rateLimiter) Allow(key string, now time.Time) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	cutoff := now.Add(-l.window)
+	timestamps := l.hits[key]
+	kept := timestamps[:0]
+	for _, ts := range timestamps {
+		if ts.After(cutoff) {
+			kept = append(kept, ts)
+		}
+	}
+
+	if len(kept) >= l.limit {
+		l.hits[key] = kept
+		retryAfter := kept[0].Add(l.window).Sub(now)
+		if retryAfter < time.Second {
+			retryAfter = time.Second
+		}
+		return false, retryAfter
+	}
+
+	kept = append(kept, now)
+	l.hits[key] = kept
+	return true, 0
+}
+
 type handler struct {
-	hub   *hub.Hub
-	store store.MessageStore
+	hub           *hub.Hub
+	store         store.MessageStore
+	notifyLimiter *rateLimiter
 }
 
 func NewHandler(h *hub.Hub, st store.MessageStore, jwtSecret []byte) http.Handler {
@@ -53,7 +100,11 @@ func NewHandler(h *hub.Hub, st store.MessageStore, jwtSecret []byte) http.Handle
 	if st == nil {
 		st = store.NewMemoryStore()
 	}
-	api := &handler{hub: h, store: st}
+	api := &handler{
+		hub:           h,
+		store:         st,
+		notifyLimiter: newRateLimiter(notifyRateLimit, notifyRateWindow),
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
@@ -169,6 +220,25 @@ func (h *handler) handleNotificationStream(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *handler) handleSendNotification(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	senderID := strings.TrimSpace(claims.Sub)
+	if !ok || senderID == "" {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	role := strings.ToLower(strings.TrimSpace(claims.Role))
+	if role != "service" && role != "admin" {
+		writeError(w, http.StatusForbidden, "insufficient permissions to send notifications")
+		return
+	}
+
+	if allowed, retryAfter := h.notifyLimiter.Allow(senderID, time.Now()); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
+		writeError(w, http.StatusTooManyRequests, "notification rate limit exceeded")
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req notifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -187,7 +257,17 @@ func (h *handler) handleSendNotification(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ev := h.hub.NotifyUser(toUserID, strings.TrimSpace(req.FromUserID), text)
+	fromUserID := senderID
+	reqFrom := strings.TrimSpace(req.FromUserID)
+	if reqFrom != "" && reqFrom != senderID {
+		if role != "service" {
+			writeError(w, http.StatusForbidden, "cannot spoof from_user_id")
+			return
+		}
+		fromUserID = reqFrom
+	}
+
+	ev := h.hub.NotifyUser(toUserID, fromUserID, text)
 	writeJSON(w, http.StatusCreated, ev)
 }
 
