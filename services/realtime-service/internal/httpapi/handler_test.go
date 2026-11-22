@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/tarrot-team/tarrot-app/services/realtime-service/internal/hub"
+	"github.com/tarrot-team/tarrot-app/services/realtime-service/internal/store"
 )
 
 func TestHandleHealth(t *testing.T) {
-	api := NewHandler(hub.New())
+	api := NewHandler(hub.New(), store.NewMemoryStore())
 	rec := httptest.NewRecorder()
 	api.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
@@ -24,7 +25,7 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestPostAndGetRoomMessages(t *testing.T) {
-	api := NewHandler(hub.New())
+	api := NewHandler(hub.New(), store.NewMemoryStore())
 
 	unauth := httptest.NewRecorder()
 	api.ServeHTTP(unauth, httptest.NewRequest(http.MethodPost, "/rooms/tarot/messages", bytes.NewBufferString(`{"text":"hi"}`)))
@@ -58,7 +59,7 @@ func TestPostAndGetRoomMessages(t *testing.T) {
 
 func TestRoomSSEStream(t *testing.T) {
 	h := hub.New()
-	api := NewHandler(h)
+	api := NewHandler(h, store.NewMemoryStore())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/rooms/tarot/stream", nil).WithContext(ctx)
@@ -92,7 +93,7 @@ func TestRoomSSEStream(t *testing.T) {
 
 func TestSendNotification(t *testing.T) {
 	h := hub.New()
-	api := NewHandler(h)
+	api := NewHandler(h, store.NewMemoryStore())
 
 	ch, cancel := h.SubscribeUser("user-9")
 	defer cancel()
