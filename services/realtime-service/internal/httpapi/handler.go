@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/tarrot-team/tarrot-app/services/realtime-service/internal/hub"
+	"github.com/tarrot-team/tarrot-app/services/realtime-service/internal/store"
 )
 
 const (
@@ -40,14 +41,18 @@ type errorResponse struct {
 }
 
 type handler struct {
-	hub *hub.Hub
+	hub   *hub.Hub
+	store store.MessageStore
 }
 
-func NewHandler(h *hub.Hub) http.Handler {
+func NewHandler(h *hub.Hub, st store.MessageStore) http.Handler {
 	if h == nil {
 		h = hub.New()
 	}
-	api := &handler{hub: h}
+	if st == nil {
+		st = store.NewMemoryStore()
+	}
+	api := &handler{hub: h, store: st}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
@@ -94,6 +99,10 @@ func (h *handler) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ev := h.hub.PublishMessage(room, userID, text)
+	if err := h.store.SaveMessage(r.Context(), ev); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save message")
+		return
+	}
 	writeJSON(w, http.StatusCreated, ev)
 }
 
@@ -114,10 +123,16 @@ func (h *handler) handleRoomMessages(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 
+	msgs, err := h.store.ListMessages(r.Context(), room, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load messages")
+		return
+	}
+
 	writeJSON(w, http.StatusOK, roomMessagesResponse{
 		Room:     room,
 		Online:   h.hub.RoomSubscribers(room),
-		Messages: h.hub.RecentMessages(room, limit),
+		Messages: msgs,
 	})
 }
 
