@@ -26,9 +26,8 @@ type sendMessageRequest struct {
 }
 
 type notifyRequest struct {
-	ToUserID   string `json:"to_user_id"`
-	FromUserID string `json:"from_user_id"`
-	Text       string `json:"text"`
+	ToUserID string `json:"to_user_id"`
+	Text     string `json:"text"`
 }
 
 type roomMessagesResponse struct {
@@ -169,6 +168,12 @@ func (h *handler) handleNotificationStream(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *handler) handleSendNotification(w http.ResponseWriter, r *http.Request) {
+	fromUserID, ok := auth.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var req notifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -187,7 +192,7 @@ func (h *handler) handleSendNotification(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ev := h.hub.NotifyUser(toUserID, strings.TrimSpace(req.FromUserID), text)
+	ev := h.hub.NotifyUser(toUserID, fromUserID, text)
 	writeJSON(w, http.StatusCreated, ev)
 }
 

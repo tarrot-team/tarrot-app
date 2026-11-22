@@ -112,9 +112,11 @@ func TestSendNotification(t *testing.T) {
 	ch, cancel := h.SubscribeUser("user-9")
 	defer cancel()
 
-	body := bytes.NewBufferString(`{"to_user_id":"user-9","from_user_id":"user-2","text":"Лайкнул твой пост"}`)
+	body := bytes.NewBufferString(`{"to_user_id":"user-9","text":"Лайкнул твой пост"}`)
+	req := httptest.NewRequest(http.MethodPost, "/notifications", body)
+	req.Header.Set("Authorization", bearerFor(t, "user-2"))
 	rec := httptest.NewRecorder()
-	api.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/notifications", body))
+	api.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d; want 201", rec.Code)
@@ -122,8 +124,8 @@ func TestSendNotification(t *testing.T) {
 
 	select {
 	case ev := <-ch:
-		if ev.Text != "Лайкнул твой пост" {
-			t.Errorf("got text = %q", ev.Text)
+		if ev.Text != "Лайкнул твой пост" || ev.FromUserID != "user-2" {
+			t.Errorf("got event = %+v", ev)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for notification")
