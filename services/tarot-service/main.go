@@ -1,16 +1,20 @@
 package main
 
 import (
-	"log"
+	"context"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/httpapi"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/interpreter"
+	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/reading"
 )
 
 func main() {
+	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
 	port := envOr("PORT", "8081")
 	llmBaseURL := envOr("LLM_BASE_URL", "https://api.groq.com/openai/v1")
 	llmModel := envOr("LLM_MODEL", "llama-3.3-70b-versatile")
@@ -25,20 +29,47 @@ func main() {
 			Primary:  interpreter.NewOpenAICompatClient(llmBaseURL, llmAPIKey, llmModel),
 			Fallback: interpreter.FallbackInterpreter{},
 		}
-		log.Printf("tarot-service LLM enabled (%s, model=%s)", llmBaseURL, llmModel)
+		log.Info("LLM enabled", "base_url", llmBaseURL, "model", llmModel)
 	} else {
-		log.Println("tarot-service running with fallback interpreter (set GROQ_API_KEY or LLM_API_KEY to enable AI)")
+		log.Info("running with fallback interpreter")
+	}
+
+	var store reading.Store
+	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		pgStore, err := reading.OpenPostgres(ctx, dsn)
+		cancel()
+		if err != nil {
+			log.Error("failed to connect to postgres", "err", err)
+			os.Exit(1)
+		}
+		defer func() { _ = pgStore.Close() }()
+
+		schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err = pgStore.EnsureSchema(schemaCtx)
+		schemaCancel()
+		if err != nil {
+			log.Error("failed to ensure database schema", "err", err)
+			os.Exit(1)
+		}
+
+		store = pgStore
+		log.Info("using postgres storage")
+	} else {
+		store = reading.NewMemoryStore()
+		log.Info("DATABASE_URL is empty, using in-memory storage")
 	}
 
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           httpapi.NewHandler(interp),
+		Handler:           httpapi.NewHandler(interp, store),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Printf("tarot-service listening on :%s", port)
+	log.Info("tarot-service started", "addr", srv.Addr)
 	if err := srv.ListenAndServe(); err != nil {
-		log.Fatal(err)
+		log.Error("server stopped", "err", err)
+		os.Exit(1)
 	}
 }
 

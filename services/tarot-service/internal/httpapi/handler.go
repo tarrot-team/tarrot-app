@@ -13,10 +13,15 @@ import (
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/deck"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/interpreter"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/matrix"
+	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/reading"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/spread"
 )
 
-const maxQuestionRunes = 500
+const (
+	maxQuestionRunes = 500
+	defaultListLimit = 20
+	maxListLimit     = 100
+)
 
 type matrixResponse struct {
 	BirthDate string                   `json:"birth_date"`
@@ -31,11 +36,13 @@ type spreadRequest struct {
 }
 
 type spreadResponse struct {
+	ID             string        `json:"id,omitempty"`
 	Mode           string        `json:"mode"`
 	Question       string        `json:"question,omitempty"`
 	Spread         spread.Spread `json:"spread"`
 	Interpretation string        `json:"interpretation"`
 	Source         string        `json:"source"`
+	CreatedAt      *time.Time    `json:"created_at,omitempty"`
 }
 
 type errorResponse struct {
@@ -44,13 +51,20 @@ type errorResponse struct {
 
 type handler struct {
 	interpreter interpreter.Interpreter
+	readings    reading.Store
 }
 
-func NewHandler(interp interpreter.Interpreter) http.Handler {
+func NewHandler(interp interpreter.Interpreter, store reading.Store) http.Handler {
 	if interp == nil {
 		interp = interpreter.FallbackInterpreter{}
 	}
-	h := &handler{interpreter: interp}
+	if store == nil {
+		store = reading.NewMemoryStore()
+	}
+	h := &handler{
+		interpreter: interp,
+		readings:    store,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
@@ -59,6 +73,9 @@ func NewHandler(interp interpreter.Interpreter) http.Handler {
 	mux.HandleFunc("GET /deck", handleDeck)
 	mux.HandleFunc("GET /matrix", handleMatrix)
 	mux.HandleFunc("POST /spread", h.handleSpread)
+	mux.HandleFunc("GET /spreads", h.handleListSpreads)
+	mux.HandleFunc("GET /spreads/{id}", h.handleGetSpread)
+	mux.HandleFunc("DELETE /spreads/{id}", h.handleDeleteSpread)
 	return mux
 }
 
@@ -186,13 +203,100 @@ func (h *handler) handleSpread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, spreadResponse{
+	resp := spreadResponse{
 		Mode:           mode,
 		Question:       req.Question,
 		Spread:         sp,
 		Interpretation: res.Text,
 		Source:         res.Source,
-	})
+	}
+
+	if userID := strings.TrimSpace(r.Header.Get("X-User-ID")); userID != "" {
+		now := time.Now().UTC()
+		rec := reading.Reading{
+			ID:             reading.NewID(),
+			UserID:         userID,
+			Mode:           mode,
+			Question:       req.Question,
+			Spread:         sp,
+			Interpretation: res.Text,
+			Source:         res.Source,
+			CreatedAt:      now,
+		}
+		if err := h.readings.Save(r.Context(), rec); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save reading")
+			return
+		}
+		resp.ID = rec.ID
+		resp.CreatedAt = &now
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *handler) handleListSpreads(w http.ResponseWriter, r *http.Request) {
+	userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "missing X-User-ID header")
+		return
+	}
+
+	limit := defaultListLimit
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed < 1 || parsed > maxListLimit {
+			writeError(w, http.StatusBadRequest, "limit must be between 1 and 100")
+			return
+		}
+		limit = parsed
+	}
+
+	items, err := h.readings.ListByUser(r.Context(), userID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list readings")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (h *handler) handleGetSpread(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	item, err := h.readings.GetByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, reading.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to get reading")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (h *handler) handleDeleteSpread(w http.ResponseWriter, r *http.Request) {
+	userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "missing X-User-ID header")
+		return
+	}
+
+	id := strings.TrimSpace(r.PathValue("id"))
+	if err := h.readings.Delete(r.Context(), id, userID); err != nil {
+		if errors.Is(err, reading.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if errors.Is(err, reading.ErrForbidden) {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to delete reading")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {

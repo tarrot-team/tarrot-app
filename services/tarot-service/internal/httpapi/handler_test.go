@@ -12,6 +12,7 @@ import (
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/arcana"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/deck"
 	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/interpreter"
+	"github.com/tarrot-team/tarrot-app/services/tarot-service/internal/reading"
 )
 
 type mockInterpreter struct {
@@ -23,7 +24,7 @@ func (m mockInterpreter) InterpretSpread(_ context.Context, _ interpreter.Input)
 }
 
 func TestHandleHealth(t *testing.T) {
-	h := NewHandler(nil)
+	h := NewHandler(nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
 
@@ -35,7 +36,7 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleAllArcana(t *testing.T) {
-	h := NewHandler(nil)
+	h := NewHandler(nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/arcana", nil)
 	rec := httptest.NewRecorder()
 
@@ -55,7 +56,7 @@ func TestHandleAllArcana(t *testing.T) {
 }
 
 func TestHandleDeck(t *testing.T) {
-	h := NewHandler(nil)
+	h := NewHandler(nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/deck", nil)
 	rec := httptest.NewRecorder()
 
@@ -75,7 +76,7 @@ func TestHandleDeck(t *testing.T) {
 }
 
 func TestHandleArcanaByNumber(t *testing.T) {
-	h := NewHandler(nil)
+	h := NewHandler(nil, nil)
 
 	t.Run("valid number", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/arcana/8", nil)
@@ -120,7 +121,7 @@ func TestHandleArcanaByNumber(t *testing.T) {
 }
 
 func TestHandleMatrix(t *testing.T) {
-	h := NewHandler(nil)
+	h := NewHandler(nil, nil)
 
 	t.Run("valid birth date", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/matrix?birth_date=1999-12-29", nil)
@@ -171,7 +172,7 @@ func TestHandleMatrix(t *testing.T) {
 }
 
 func TestHandleSpread(t *testing.T) {
-	h := NewHandler(mockInterpreter{text: "Тестовая трактовка"})
+	h := NewHandler(mockInterpreter{text: "Тестовая трактовка"}, reading.NewMemoryStore())
 
 	t.Run("valid three cards", func(t *testing.T) {
 		body := bytes.NewBufferString(`{"type":"three_cards","question":"Что будет на работе?"}`)
@@ -193,6 +194,9 @@ func TestHandleSpread(t *testing.T) {
 		}
 		if got.Interpretation != "Тестовая трактовка" || got.Source != "ai" {
 			t.Errorf("unexpected interpretation: %+v", got)
+		}
+		if got.ID != "" {
+			t.Errorf("expected empty id without X-User-ID, got %q", got.ID)
 		}
 	})
 
@@ -255,4 +259,74 @@ func TestHandleSpread(t *testing.T) {
 			t.Fatalf("status = %d; want %d", rec.Code, http.StatusBadRequest)
 		}
 	})
+}
+
+func TestSpreadHistoryFlow(t *testing.T) {
+	h := NewHandler(mockInterpreter{text: "Сохранённая трактовка"}, reading.NewMemoryStore())
+
+	createReq := httptest.NewRequest(http.MethodPost, "/spread", bytes.NewBufferString(`{"type":"daily","question":"Как пройдёт день?"}`))
+	createReq.Header.Set("X-User-ID", "user-1")
+	createRec := httptest.NewRecorder()
+	h.ServeHTTP(createRec, createReq)
+
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create status = %d; want 200", createRec.Code)
+	}
+	var created spreadResponse
+	if err := json.NewDecoder(createRec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created: %v", err)
+	}
+	if created.ID == "" || created.CreatedAt == nil {
+		t.Fatalf("expected id and created_at, got %+v", created)
+	}
+
+	unauthList := httptest.NewRecorder()
+	h.ServeHTTP(unauthList, httptest.NewRequest(http.MethodGet, "/spreads", nil))
+	if unauthList.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth list status = %d; want 401", unauthList.Code)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/spreads", nil)
+	listReq.Header.Set("X-User-ID", "user-1")
+	listRec := httptest.NewRecorder()
+	h.ServeHTTP(listRec, listReq)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d; want 200", listRec.Code)
+	}
+	var items []reading.Reading
+	if err := json.NewDecoder(listRec.Body).Decode(&items); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != created.ID {
+		t.Fatalf("unexpected list: %+v", items)
+	}
+
+	getRec := httptest.NewRecorder()
+	h.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/spreads/"+created.ID, nil))
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get status = %d; want 200", getRec.Code)
+	}
+
+	forbidDel := httptest.NewRequest(http.MethodDelete, "/spreads/"+created.ID, nil)
+	forbidDel.Header.Set("X-User-ID", "user-2")
+	forbidRec := httptest.NewRecorder()
+	h.ServeHTTP(forbidRec, forbidDel)
+	if forbidRec.Code != http.StatusForbidden {
+		t.Fatalf("forbidden delete status = %d; want 403", forbidRec.Code)
+	}
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/spreads/"+created.ID, nil)
+	delReq.Header.Set("X-User-ID", "user-1")
+	delRec := httptest.NewRecorder()
+	h.ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d; want 204", delRec.Code)
+	}
+
+	missingRec := httptest.NewRecorder()
+	h.ServeHTTP(missingRec, httptest.NewRequest(http.MethodGet, "/spreads/"+created.ID, nil))
+	if missingRec.Code != http.StatusNotFound {
+		t.Fatalf("get deleted status = %d; want 404", missingRec.Code)
+	}
 }
