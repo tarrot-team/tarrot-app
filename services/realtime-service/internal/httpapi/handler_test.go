@@ -113,8 +113,11 @@ func TestSendNotification(t *testing.T) {
 	defer cancel()
 
 	body := bytes.NewBufferString(`{"to_user_id":"user-9","from_user_id":"user-2","text":"Лайкнул твой пост"}`)
+	req := httptest.NewRequest(http.MethodPost, "/notifications", body)
+	req.Header.Set("Authorization", "Bearer "+signNotificationToken(t, "community-service", "service"))
+
 	rec := httptest.NewRecorder()
-	api.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/notifications", body))
+	api.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d; want 201", rec.Code)
